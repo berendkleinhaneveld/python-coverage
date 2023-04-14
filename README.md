@@ -1,2 +1,3 @@
-# python-coverage
-Sublime Text plugin to show python code coverage
+# Sublime Python Coverage
+
+Sublime Text plugin to show missing lines of python code coverage
