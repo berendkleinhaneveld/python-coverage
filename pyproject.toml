@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "python-coverage"
+version = "0.1.0"
+description = "Sublime plugin for showing python code coverage misses"
+authors = ["Berend Klein Haneveld <berendkleinhaneveld@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+# The poetry sections only serve as specification for the
+# dev dependencies needed for development of the plugin
+
+[tool.poetry.group.dev.dependencies]
+black = "*"
+pre-commit = "*"
+ruff = "*"
+
+[tool.ruff]
+# Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
+select = ["E", "F", "I", "B", "N", "A", "PTH"]
