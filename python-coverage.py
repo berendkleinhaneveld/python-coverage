@@ -251,8 +251,7 @@ class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
             key="python-coverage",
             regions=missing_regions,
             scope="region.orangish",
-            # TODO: create/use better icon for gutter
-            icon="circle",
+            icon="Packages/python-coverage/line.png",
             flags=sublime.RegionFlags.HIDDEN,
         )
 
