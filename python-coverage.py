@@ -10,6 +10,15 @@ HERE = Path(__file__).parent
 # https://coverage.readthedocs.io/en/stable/api_coveragedata.html#coverage.CoverageData
 # https://www.sublimetext.com/docs/api_reference.html#sublime.View
 # https://github.com/berendkleinhaneveld/sublime-doorstop/blob/main/doorstop_plugin.py
+# https://python-watchdog.readthedocs.io/en/stable/
+
+COVERAGE_FILES = {}
+FILE_OBSERVER = None
+
+FileWatcher = None
+LAST_ACTIVE_VIEW = None
+
+SETTINGS_FILE = "Python Coverage.sublime-settings"
 
 
 def plugin_loaded():
@@ -24,24 +33,160 @@ def plugin_loaded():
 
     tags = [str(tag) for tag in sys_tags()]
 
-    # Figure out the right whl for the platform
-    for wheel in (HERE / "libs").glob("coverage*"):
-        wheel_tag = "-".join(wheel.stem.split("-")[2:])
-        if wheel_tag in tags:
-            break
-    else:
-        print("Could not find compatible coverage wheel for your platform")
-        return
+    for prefix in {"coverage*", "watchdog*"}:
+        # Figure out the right whl for the platform
+        for wheel in (HERE / "libs").glob(prefix):
+            wheel_tag = "-".join(wheel.stem.split("-")[2:])
+            if wheel_tag in tags:
+                break
+        else:
+            print(f"Could not find compatible {prefix} wheel for your platform")
+            return
 
-    if str(wheel) not in sys.path:
-        sys.path.append(str(wheel))
+        if str(wheel) not in sys.path:
+            sys.path.append(str(wheel))
+
+    from watchdog.observers import Observer
+
+    # TODO: only start watching when plugin is showing missing lines
+    global FILE_OBSERVER
+    FILE_OBSERVER = Observer()
+    FILE_OBSERVER.start()
+
+    from watchdog.events import FileSystemEventHandler
+
+    class _FileWatcher(FileSystemEventHandler):
+        def __init__(self, file):
+            super().__init__()
+            self.file = file
+
+        def _update(self, event):
+            if not event.src_path.endswith(".coverage"):
+                return
+
+            if str(event.src_path) != str(self.file):
+                return
+
+            COVERAGE_FILES[self.file].update()
+
+            if LAST_ACTIVE_VIEW:
+                LAST_ACTIVE_VIEW._update_regions()
+
+        def on_modified(self, event):
+            self._update(event)
+
+        def on_created(self, event):
+            self._update(event)
+
+    global FileWatcher
+    FileWatcher = _FileWatcher
 
 
 def plugin_unloaded():
     """
     Hook that is called by Sublime when plugin is unloaded.
     """
-    pass
+    COVERAGE_FILES.clear()
+    global FILE_OBSERVER
+    FILE_OBSERVER.stop()
+    FILE_OBSERVER.join()
+    FILE_OBSERVER = None
+    global LAST_ACTIVE_VIEW
+    LAST_ACTIVE_VIEW = None
+
+
+class CoverageFile:
+    def __init__(self, coverage_file):
+        import coverage
+
+        self.coverage_file = coverage_file
+        self.data = coverage.Coverage(data_file=coverage_file).get_data()
+        self.data.read()
+
+        self.handler = FileWatcher(coverage_file)
+        self.watcher = FILE_OBSERVER.schedule(self.handler, str(coverage_file.parent))
+
+    def update(self):
+        self.data.read()
+
+    def in_coverage_data(self, file):
+        return str(file) in self.data.measured_files()
+
+    def missing_lines(self, file, text):
+        from coverage.parser import PythonParser
+
+        lines = self.data.lines(file)
+        if lines is None:
+            return None
+
+        # TODO: Maybe this could be cached? And use file watcher to invalidate?
+        python_parser = PythonParser(text=text)
+        python_parser.parse_source()
+        statements = python_parser.statements
+
+        return sorted(list(statements - set(lines)), reverse=True)
+
+
+class ToggleMissingLinesCommand(sublime_plugin.ApplicationCommand):
+    def run(self):
+        settings = sublime.load_settings(SETTINGS_FILE)
+        settings["show_missing_lines"] = not settings["show_missing_lines"]
+        sublime.save_settings(SETTINGS_FILE)
+        print(
+            "Python Coverage: "
+            f"{'Enabled' if settings['show_missing_lines'] else 'Disabled'}"
+            " show missing lines"
+        )
+
+
+class PythonCoverageDataFileListener(sublime_plugin.EventListener):
+    @classmethod
+    def is_applicable(cls, settings):
+        """
+        Returns:
+            Whether this listener should apply to a view with the given Settings.
+        """
+        return True
+
+    def on_new_project_async(self, window):
+        """
+        Called right after a new project is created, passed the Window object.
+        Runs in a separate thread, and does not block the application.
+        """
+        self.update_available_coverage_files(window)
+
+    def on_load_project_async(self, window):
+        """
+        Called right after a project is loaded, passed the Window object.
+        Runs in a separate thread, and does not block the application.
+        """
+        self.update_available_coverage_files(window)
+
+    def on_post_save_project_async(self, window):
+        """
+        Called right after a project is saved, passed the Window object.
+        Runs in a separate thread, and does not block the application.
+        """
+        self.update_available_coverage_files(window)
+
+    def on_pre_close_project(self, window):
+        """
+        Called right before a project is closed, passed the Window object.
+        """
+        self.update_available_coverage_files(window)
+
+    def on_activated_async(self, view):
+        self.update_available_coverage_files(view.window())
+
+    def update_available_coverage_files(self, window):
+        settings = sublime.load_settings(SETTINGS_FILE)
+        if not settings["show_missing_lines"]:
+            return
+        for folder in window.folders():
+            folder = Path(folder)
+            coverage_file = folder / ".coverage"
+            if coverage_file.is_file() and coverage_file not in COVERAGE_FILES:
+                COVERAGE_FILES[coverage_file] = CoverageFile(coverage_file)
 
 
 class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
@@ -53,54 +198,63 @@ class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
         """
         return "Python" in settings.get("syntax", "")
 
+    def on_modified_async(self):
+        """
+        Called after changes have been made to the view.
+        Runs in a separate thread, and does not block the application.
+        """
+        pass
+        # TODO: clear the modified region(s), if any
+
     def on_activated_async(self):
         """
         Called when a view gains input focus. Runs in a separate thread,
         and does not block the application.
         """
-        # TODO: use setting/command to toggle this functionality
+        settings = sublime.load_settings(SETTINGS_FILE)
+        if not settings["show_missing_lines"]:
+            self.view.erase_regions(key="python-coverage")
+            return
+
+        global LAST_ACTIVE_VIEW
+        LAST_ACTIVE_VIEW = self
+
+        self._update_regions()
+
+    def _update_regions(self):
         file_name = self.view.file_name()
         if not file_name:
             return
 
-        window = sublime.active_window()
-        for folder in window.folders():
-            folder = Path(folder)
-            coverage_file = folder / ".coverage"
-            if not coverage_file.is_file():
-                continue
+        for coverage_file in COVERAGE_FILES:
+            # Assume that the file is somewhere within the
+            # same (sub)folder as the coverage file
+            if str(coverage_file.parent) in file_name:
+                break
+        else:
+            self.view.erase_regions(key="python-coverage")
+            return
 
-            import coverage
-            from coverage import parser
+        cov = COVERAGE_FILES[coverage_file]
+        if not cov.in_coverage_data(file_name):
+            self.view.erase_regions(key="python-coverage")
+            return
 
-            # TODO: add file watcher to coverage file and keep
-            # the CoverageData object cached somewhere
-            full_file_region = sublime.Region(0, self.view.size())
-            data = coverage.Coverage(data_file=coverage_file).get_data()
-            data.read()
-            lines = data.lines(file_name)
-            if lines is None:
-                self.view.erase_regions(key="python-coverage")
-                return
+        full_file_region = sublime.Region(0, self.view.size())
+        text = self.view.substr(full_file_region)
 
-            text = self.view.substr(full_file_region)
-            python_parser = parser.PythonParser(text=text)
-            python_parser.parse_source()
-            statements = python_parser.statements
+        missing = cov.missing_lines(file_name, text)
+        all_lines_regions = self.view.lines(full_file_region)
+        missing_regions = [all_lines_regions[line - 1] for line in missing]
 
-            missing = sorted(list(statements - set(lines)), reverse=True)
-
-            all_lines_regions = self.view.lines(full_file_region)
-            missing_regions = [all_lines_regions[line - 1] for line in missing]
-
-            self.view.add_regions(
-                key="python-coverage",
-                regions=missing_regions,
-                scope="region.orangish",
-                # TODO: create/use better icon for gutter
-                icon="dot",
-                flags=sublime.RegionFlags.HIDDEN,
-            )
+        self.view.add_regions(
+            key="python-coverage",
+            regions=missing_regions,
+            scope="region.orangish",
+            # TODO: create/use better icon for gutter
+            icon="circle",
+            flags=sublime.RegionFlags.HIDDEN,
+        )
 
     def on_hover(self, point, hover_zone):
         """

@@ -1,0 +1,19 @@
+[
+  { "caption": "Preferences: Python Coverage",
+    "command": "edit_settings",
+    "args": {
+      "base_file": "${packages}/Python Coverage/Python Coverage.sublime-settings",
+      "default": "{\n\t$0\n}\n"
+    }
+  },
+  { "caption": "Preferences: Python Coverage Key Bindings",
+    "command": "edit_settings",
+    "args": {
+      "base_file": "${packages}/Python Coverage/Default (${platform}).sublime-keymap",
+      "default": "[\n\t$0\n]\n"
+    }
+  },
+  { "caption": "Python Coverage: Toggle Missing Lines",
+    "command": "toggle_missing_lines"
+  }
+]
