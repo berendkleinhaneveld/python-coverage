@@ -251,7 +251,7 @@ class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
             key="python-coverage",
             regions=missing_regions,
             scope="region.orangish",
-            icon="Packages/sublime-python-coverage/line.png",
+            icon="Packages/sublime-python-coverage/images/triangle.png",
             flags=sublime.RegionFlags.HIDDEN,
         )
 
