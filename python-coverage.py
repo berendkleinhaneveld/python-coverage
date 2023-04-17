@@ -18,7 +18,7 @@ FILE_OBSERVER = None
 FileWatcher = None
 LAST_ACTIVE_VIEW = None
 
-SETTINGS_FILE = "Python Coverage.sublime-settings"
+SETTINGS_FILE = "python-coverage.sublime-settings"
 
 
 def plugin_loaded():
@@ -251,7 +251,7 @@ class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
             key="python-coverage",
             regions=missing_regions,
             scope="region.orangish",
-            icon="Packages/python-coverage/line.png",
+            icon="Packages/sublime-python-coverage/line.png",
             flags=sublime.RegionFlags.HIDDEN,
         )
 

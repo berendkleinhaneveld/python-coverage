@@ -2,7 +2,7 @@
   { "caption": "Preferences: Python Coverage",
     "command": "edit_settings",
     "args": {
-      "base_file": "${packages}/python-coverage/python-coverage.sublime-settings",
+      "base_file": "${packages}/sublime-python-coverage/python-coverage.sublime-settings",
       "default": "{\n\t$0\n}\n"
     }
   },
