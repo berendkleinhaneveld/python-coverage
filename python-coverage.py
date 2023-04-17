@@ -113,9 +113,13 @@ class CoverageFile:
         return str(file) in self.data.measured_files()
 
     def missing_lines(self, file, text):
+        from coverage.exceptions import DataError
         from coverage.parser import PythonParser
 
-        lines = self.data.lines(file)
+        try:
+            lines = self.data.lines(file)
+        except DataError:
+            return None
         if lines is None:
             return None
 
@@ -244,6 +248,10 @@ class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
         text = self.view.substr(full_file_region)
 
         missing = cov.missing_lines(file_name, text)
+        if not missing:
+            self.view.erase_regions(key="python-coverage")
+            return
+
         all_lines_regions = self.view.lines(full_file_region)
         missing_regions = [all_lines_regions[line - 1] for line in missing]
 
