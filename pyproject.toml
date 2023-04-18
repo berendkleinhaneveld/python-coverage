@@ -14,6 +14,7 @@ python = "^3.8"
 black = "*"
 pre-commit = "*"
 ruff = "*"
+coverage = "*"
 
 [tool.ruff]
 # Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.

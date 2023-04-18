@@ -1,5 +1,7 @@
 import sys
+from collections import defaultdict
 from pathlib import Path
+from weakref import WeakSet
 
 import sublime
 import sublime_plugin
@@ -12,12 +14,20 @@ HERE = Path(__file__).parent
 # https://github.com/berendkleinhaneveld/sublime-doorstop/blob/main/doorstop_plugin.py
 # https://python-watchdog.readthedocs.io/en/stable/
 
-COVERAGE_FILES = {}
+CACHE = {
+    "open_folders": {},  # all folders that are being watched for .coverage files
+    "coverage_files": {},  # all known coverage files
+    # all known views (set of weakrefs) for which the file is in the coverage file (key)
+    "registered_view_event_handlers": defaultdict(WeakSet),
+    "coverage_for_file": {},  # map from file to corresponding coverage file
+}
+
 FILE_OBSERVER = None
 
 FileWatcher = None
-LAST_ACTIVE_VIEW = None
 
+# TODO: show percentage in status?
+# TODO: allow for project/window specific settings
 SETTINGS_FILE = "python-coverage.sublime-settings"
 
 
@@ -48,7 +58,7 @@ def plugin_loaded():
 
     from watchdog.observers import Observer
 
-    # TODO: only start watching when plugin is showing missing lines
+    # TODO: stop watching/clear observer when disabling this plugin
     global FILE_OBSERVER
     FILE_OBSERVER = Observer()
     FILE_OBSERVER.start()
@@ -56,21 +66,20 @@ def plugin_loaded():
     from watchdog.events import FileSystemEventHandler
 
     class _FileWatcher(FileSystemEventHandler):
-        def __init__(self, file):
+        def __init__(self):
             super().__init__()
-            self.file = file
 
         def _update(self, event):
             if not event.src_path.endswith(".coverage"):
                 return
 
-            if str(event.src_path) != str(self.file):
+            if event.src_path not in CACHE["coverage_files"]:
                 return
 
-            COVERAGE_FILES[self.file].update()
-
-            if LAST_ACTIVE_VIEW:
-                LAST_ACTIVE_VIEW._update_regions()
+            CACHE["coverage_files"][event.src_path].update()
+            if handlers := CACHE["registered_view_event_handlers"].get(event.src_path):
+                for handler in handlers:
+                    handler()._update_regions()
 
         def on_modified(self, event):
             self._update(event)
@@ -79,20 +88,26 @@ def plugin_loaded():
             self._update(event)
 
     global FileWatcher
-    FileWatcher = _FileWatcher
+    FileWatcher = _FileWatcher()
 
 
 def plugin_unloaded():
     """
     Hook that is called by Sublime when plugin is unloaded.
     """
-    COVERAGE_FILES.clear()
+    CACHE["coverage_files"].clear()
+    CACHE["open_folders"].clear()
+    CACHE["registered_view_event_handlers"].clear()
+    CACHE["coverage_for_file"].clear()
+
+    # TODO; next two lines should not be necessary
+    # for watcher in CACHE["open_folders"].values():
+    #     FILE_OBSERVER.remove_handler_for_watch(FileWatcher, watcher)
+
     global FILE_OBSERVER
     FILE_OBSERVER.stop()
     FILE_OBSERVER.join()
     FILE_OBSERVER = None
-    global LAST_ACTIVE_VIEW
-    LAST_ACTIVE_VIEW = None
 
 
 class CoverageFile:
@@ -103,13 +118,10 @@ class CoverageFile:
         self.data = coverage.Coverage(data_file=coverage_file).get_data()
         self.data.read()
 
-        self.handler = FileWatcher(coverage_file)
-        self.watcher = FILE_OBSERVER.schedule(self.handler, str(coverage_file.parent))
-
     def update(self):
         self.data.read()
 
-    def in_coverage_data(self, file):
+    def contains_file(self, file):
         return str(file) in self.data.measured_files()
 
     def missing_lines(self, file, text):
@@ -124,9 +136,16 @@ class CoverageFile:
             return None
 
         # TODO: Maybe this could be cached? And use file watcher to invalidate?
+        # TODO: maybe a rust version of this could save some time?
+        import time
+
+        start = time.perf_counter()
         python_parser = PythonParser(text=text)
         python_parser.parse_source()
         statements = python_parser.statements
+        end = time.perf_counter()
+
+        print(f"parsing {file} took: {end - start}")
 
         return sorted(list(statements - set(lines)), reverse=True)
 
@@ -180,17 +199,37 @@ class PythonCoverageDataFileListener(sublime_plugin.EventListener):
         self.update_available_coverage_files(window)
 
     def on_activated_async(self, view):
-        self.update_available_coverage_files(view.window())
+        if window := view.window():
+            self.update_available_coverage_files(window)
 
     def update_available_coverage_files(self, window):
         settings = sublime.load_settings(SETTINGS_FILE)
         if not settings["show_missing_lines"]:
             return
         for folder in window.folders():
-            folder = Path(folder)
-            coverage_file = folder / ".coverage"
-            if coverage_file.is_file() and coverage_file not in COVERAGE_FILES:
-                COVERAGE_FILES[coverage_file] = CoverageFile(coverage_file)
+            # In order to save some IO:
+            # - find the currently files here once for the given folder
+            #   and mark the folder (so it won't be scanned again)
+            # - then add a watcher to that folder that watches recursively
+            #   for any .coverage files
+
+            # Check if folder is already watched (either direct or as a subdirectory)
+            if any(fold in folder for fold in CACHE["open_folders"]):
+                return
+
+            CACHE["open_folders"][folder] = FILE_OBSERVER.schedule(
+                FileWatcher, folder, recursive=True
+            )
+            print(f"Watch folder: {folder}")
+
+            for coverage_file in Path(folder).glob("**/.coverage"):
+                if (
+                    coverage_file.is_file()
+                    and coverage_file not in CACHE["coverage_files"]
+                ):
+                    CACHE["coverage_files"][str(coverage_file)] = CoverageFile(
+                        coverage_file
+                    )
 
 
 class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
@@ -215,39 +254,47 @@ class PythonCoverageEventListener(sublime_plugin.ViewEventListener):
         Called when a view gains input focus. Runs in a separate thread,
         and does not block the application.
         """
+        # FIXME: this is not always called for 'cloned'? views?
+        # Maybe change to EventListener instead and just iterate through all the
+        # (Python) views?
+        # Also keep a dict of filenames with cached parsed results
+        # The file watcher can remove the cached entries on any change
+
         settings = sublime.load_settings(SETTINGS_FILE)
         if not settings["show_missing_lines"]:
             self.view.erase_regions(key="python-coverage")
             return
-
-        global LAST_ACTIVE_VIEW
-        LAST_ACTIVE_VIEW = self
 
         self._update_regions()
 
     def _update_regions(self):
         file_name = self.view.file_name()
         if not file_name:
+            print("View without file_name")
             return
 
-        for coverage_file in COVERAGE_FILES:
-            # Assume that the file is somewhere within the
-            # same (sub)folder as the coverage file
-            if str(coverage_file.parent) in file_name:
-                break
-        else:
-            self.view.erase_regions(key="python-coverage")
-            return
+        coverage_file = CACHE["coverage_for_file"].get(file_name)
 
-        cov = COVERAGE_FILES[coverage_file]
-        if not cov.in_coverage_data(file_name):
-            self.view.erase_regions(key="python-coverage")
-            return
+        if not coverage_file:
+            for coverage_file in CACHE["coverage_files"].values():
+                if coverage_file.contains_file(file_name):
+                    CACHE["coverage_for_file"][file_name] = coverage_file
+                    break
+            else:
+                print(f"File not in any coverage file: {file_name}")
+                self.view.erase_regions(key="python-coverage")
+                return
+
+        CACHE["registered_view_event_handlers"][file_name].add(self.view)
+        print(
+            f"#views for {file_name}: "
+            f'{len(CACHE["registered_view_event_handlers"][file_name])}'
+        )
 
         full_file_region = sublime.Region(0, self.view.size())
         text = self.view.substr(full_file_region)
 
-        missing = cov.missing_lines(file_name, text)
+        missing = coverage_file.missing_lines(file_name, text)
         if not missing:
             self.view.erase_regions(key="python-coverage")
             return
